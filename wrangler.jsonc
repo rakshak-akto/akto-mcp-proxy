@@ -1,0 +1,41 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "static-frontend-container-backend",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-06-23",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"observability": {
+		"enabled": true
+	},
+	"assets": {
+		"directory": "./dist",
+		"run_worker_first": [
+			"/api/*" // API routes skip static asset handling
+		]
+	},
+	"containers": [
+		{
+			"class_name": "Backend",
+			"image": "./Dockerfile",
+			"max_instances": 3
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "Backend",
+				"name": "BACKEND"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"new_sqlite_classes": [
+				"Backend"
+			],
+			"tag": "v1"
+		}
+	]
+}

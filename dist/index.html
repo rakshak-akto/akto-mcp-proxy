@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Widgets</title>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.13.3/cdn.min.js"></script>
+</head>
+
+<body>
+  <div x-data="widgets()" x-init="fetchWidgets()">
+    <h1>Widgets</h1>
+    <div x-show="loading">Loading...</div>
+    <div x-show="error" x-text="error" style="color: red;"></div>
+    <ul x-show="!loading && !error">
+      <template x-for="widget in widgets" :key="widget.id">
+        <li>
+          <span x-text="widget.name"></span> - (ID: <span x-text="widget.id"></span>)
+        </li>
+      </template>
+    </ul>
+
+    <div x-show="!loading && !error && widgets.length === 0">
+      No widgets found.
+    </div>
+  </div>
+
+  <script>
+    function widgets() {
+      return {
+        widgets: [],
+        loading: false,
+        error: null,
+
+        async fetchWidgets() {
+          this.loading = true;
+          this.error = null;
+
+          try {
+            const response = await fetch('/api/widgets');
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            this.widgets = await response.json();
+          } catch (err) {
+            this.error = err.message;
+          } finally {
+            this.loading = false;
+          }
+        }
+      }
+    }
+  </script>
+</body>
+
+</html>
