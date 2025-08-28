@@ -36,7 +36,8 @@
 			"new_sqlite_classes": [
 				"Backend"
 			],
-			"tag": "v1"
+			"tag": "v1",
+			"new_tag": "v1"
 		}
 	]
 }
