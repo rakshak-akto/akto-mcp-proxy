@@ -59,3 +59,12 @@ jspm_packages/
 
 .dev.vars
 .wrangler/
+
+# IDE files (IntelliJ)
+.idea/
+
+# go build files
+go.sum
+
+# Build file
+container_src/main

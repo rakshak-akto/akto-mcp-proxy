@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -63,7 +62,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Parse the path to extract server name
 	pathRegex := regexp.MustCompile(`^/([^/]+)/?(.*)$`)
 	matches := pathRegex.FindStringSubmatch(r.URL.Path)
-	
+
 	if len(matches) < 2 {
 		http.Error(w, "Invalid path format. Expected: /mcp-server-name/...", http.StatusBadRequest)
 		return
@@ -109,21 +108,21 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, config 
 
 	// Create reverse proxy
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-	
+
 	// Customize the director to handle MCP-specific headers
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
-		
+
 		// Add MCP-specific headers
 		req.Header.Set("X-MCP-Proxy", "true")
 		req.Header.Set("X-Original-Host", r.Host)
-		
+
 		// Preserve important headers
 		if userAgent := r.Header.Get("User-Agent"); userAgent != "" {
 			req.Header.Set("User-Agent", userAgent)
 		}
-		
+
 		// Handle MCP protocol headers
 		if mcpVersion := r.Header.Get("MCP-Version"); mcpVersion != "" {
 			req.Header.Set("MCP-Version", mcpVersion)
@@ -188,7 +187,7 @@ func (p *ProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Request, co
 				}
 				break
 			}
-			
+
 			if err := targetConn.WriteMessage(messageType, message); err != nil {
 				log.Printf("Error forwarding to target: %v", err)
 				break
@@ -207,7 +206,7 @@ func (p *ProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Request, co
 				}
 				break
 			}
-			
+
 			if err := clientConn.WriteMessage(messageType, message); err != nil {
 				log.Printf("Error forwarding to client: %v", err)
 				break
@@ -247,7 +246,7 @@ func (p *ProxyServer) handleSSE(w http.ResponseWriter, r *http.Request, config *
 	client := &http.Client{
 		Timeout: 0, // No timeout for SSE
 	}
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		http.Error(w, "Failed to connect to target", http.StatusBadGateway)
@@ -260,7 +259,7 @@ func (p *ProxyServer) handleSSE(w http.ResponseWriter, r *http.Request, config *
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	
+
 	// Copy other headers from response
 	for key, values := range resp.Header {
 		if key != "Content-Length" {
@@ -341,10 +340,10 @@ func main() {
 	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		proxy.serversMu.RLock()
 		defer proxy.serversMu.RUnlock()
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		
+
 		fmt.Fprint(w, `{"servers":{`)
 		first := true
 		for name, config := range proxy.servers {
@@ -352,7 +351,7 @@ func main() {
 				fmt.Fprint(w, ",")
 			}
 			first = false
-			fmt.Fprintf(w, `"%s":{"transport":"%s","http":"%s","ws":"%s","sse":"%s"}`, 
+			fmt.Fprintf(w, `"%s":{"transport":"%s","http":"%s","ws":"%s","sse":"%s"}`,
 				name, config.Transport, config.HTTPUrl, config.WSUrl, config.SSEUrl)
 		}
 		fmt.Fprint(w, `}}`)
@@ -388,7 +387,7 @@ func main() {
 	log.Printf("MCP Proxy Server starting on port %s", port)
 	log.Printf("Health check: http://localhost:%s/health", port)
 	log.Printf("Status: http://localhost:%s/status", port)
-	
+
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failed to start: %v", err)
 	}
@@ -400,28 +399,3 @@ func getEnvOrDefault(key, defaultValue string) string {
 	}
 	return defaultValue
 }
-
-// package main
-
-// import (
-// 	"encoding/json"
-// 	"log"
-// 	"net/http"
-// )
-
-// func handler(w http.ResponseWriter, r *http.Request) {
-// 	widgets := []map[string]interface{}{
-// 		{"id": 1, "name": "Widget A"},
-// 		{"id": 2, "name": "Widget B"},
-// 		{"id": 3, "name": "Widget C"},
-// 	}
-
-// 	w.Header().Set("Content-Type", "application/json")
-// 	w.Header().Set("Access-Control-Allow-Origin", "*")
-// 	json.NewEncoder(w).Encode(widgets)
-// }
-
-// func main() {
-// 	http.HandleFunc("/api/widgets", handler)
-// 	log.Fatal(http.ListenAndServe(":8080", nil))
-// }

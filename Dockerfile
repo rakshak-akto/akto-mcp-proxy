@@ -1,12 +1,14 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.24-alpine AS build
+FROM golang:1.21-alpine AS build
 
 # Set destination for COPY
 WORKDIR /app
 
-# Download any Go modules
+# Copy go.mod only
 COPY container_src/go.mod ./
+
+# Download dependencies - this will create/update go.sum
 RUN go mod download
 
 # Copy container source code
