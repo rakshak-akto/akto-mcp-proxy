@@ -1,6 +1,7 @@
-module server
+module mcp-proxy
 
 go 1.24.3
 
-go mod init mcp-proxy
-go get github.com/gorilla/websocket
+require (
+	github.com/gorilla/websocket v1.5.3
+)
