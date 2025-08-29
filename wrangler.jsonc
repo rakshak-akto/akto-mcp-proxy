@@ -1,6 +1,6 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "static-frontend-container-backend",
+	"name": "akto-mcp-proxy",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-06-23",
 	"compatibility_flags": [
@@ -36,8 +36,7 @@
 			"new_sqlite_classes": [
 				"Backend"
 			],
-			"tag": "v1",
-			"new_tag": "v1"
+			"tag": "v1"
 		}
 	]
 }
