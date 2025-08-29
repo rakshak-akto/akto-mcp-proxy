@@ -8,11 +8,11 @@ WORKDIR /app
 # Copy go.mod only
 COPY container_src/go.mod ./
 
-# Download dependencies - this will create/update go.sum
-RUN go mod download
-
 # Copy container source code
 COPY container_src/*.go ./
+
+# Download dependencies and create go.sum
+RUN go mod tidy
 
 # Build
 RUN CGO_ENABLED=0 GOOS=linux go build -o /server
