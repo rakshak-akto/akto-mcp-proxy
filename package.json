@@ -1,5 +1,5 @@
 {
-	"name": "static-frontend-container-backend",
+	"name": "akto-mcp-proxy",
 	"description": "Run a static frontend talking to a containerized backend on Cloudflare Workers",
 	"version": "0.0.3",
 	"private": true,
