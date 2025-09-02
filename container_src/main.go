@@ -1,401 +1,300 @@
 package main
 
 import (
-	"context"
+	"bufio"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
-	"os/signal"
 	"regexp"
 	"strings"
-	"sync"
-	"syscall"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
+// LogEntry represents the JSON log format matching nginx
+type LogEntry struct {
+	Time     string `json:"time"`
+	Client   string `json:"client"`
+	Method   string `json:"method"`
+	URI      string `json:"uri"`
+	Status   int    `json:"status"`
+	Upstream string `json:"upstream"`
+}
+
+// ProxyServer holds the server configuration
 type ProxyServer struct {
-	servers   map[string]*ServerConfig
-	serversMu sync.RWMutex
-	upgrader  websocket.Upgrader
+	logger *log.Logger
+	client *http.Client
 }
 
-type ServerConfig struct {
-	Name      string
-	HTTPUrl   string
-	WSUrl     string
-	SSEUrl    string
-	Transport string // "http", "websocket", "sse"
-}
-
+// NewProxyServer creates a new proxy server instance
 func NewProxyServer() *ProxyServer {
-	return &ProxyServer{
-		servers: make(map[string]*ServerConfig),
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool {
-				return true // Allow all origins for development
+	// Create HTTP client with similar timeouts to nginx config
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second, // proxy_connect_timeout
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, // proxy_ssl_verify off
 			},
+			DisableCompression:    true, // Accept-Encoding ""
+			MaxIdleConnsPerHost:   100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second, // Add header timeout
 		},
+		// Remove global timeout for SSE streaming
+	}
+
+	return &ProxyServer{
+		logger: log.New(os.Stdout, "", 0),
+		client: client,
 	}
 }
 
-func (p *ProxyServer) RegisterServer(name string, config *ServerConfig) {
-	p.serversMu.Lock()
-	defer p.serversMu.Unlock()
-	p.servers[name] = config
-	log.Printf("Registered MCP server: %s with transport: %s", name, config.Transport)
+// logRequest logs in JSON format matching nginx
+func (ps *ProxyServer) logRequest(r *http.Request, status int, upstream string) {
+	clientIP := r.RemoteAddr
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		clientIP = strings.Split(xff, ",")[0]
+	}
+	if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+		clientIP = realIP
+	}
+
+	entry := LogEntry{
+		Time:     time.Now().Format(time.RFC3339),
+		Client:   clientIP,
+		Method:   r.Method,
+		URI:      r.RequestURI,
+		Status:   status,
+		Upstream: upstream,
+	}
+
+	jsonData, _ := json.Marshal(entry)
+	ps.logger.Println(string(jsonData))
 }
 
-func (p *ProxyServer) getServerConfig(name string) (*ServerConfig, bool) {
-	p.serversMu.RLock()
-	defer p.serversMu.RUnlock()
-	config, exists := p.servers[name]
-	return config, exists
+// healthHandler handles /health endpoint
+func (ps *ProxyServer) healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("healthy\n"))
 }
 
-func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Parse the path to extract server name
-	pathRegex := regexp.MustCompile(`^/([^/]+)/?(.*)$`)
+// extractSNIHost extracts the host part for SNI (removes port)
+func extractSNIHost(hostPort string) string {
+	if host, _, err := net.SplitHostPort(hostPort); err == nil {
+		return host
+	}
+	return hostPort
+}
+
+// rewriteSSEContent rewrites SSE content to include proxy prefix (fallback method)
+func rewriteSSEContent(content []byte, targetScheme, targetHost string) []byte {
+	// Rewrite "data: /message?" to "data: /proxy/<scheme>/<host>/message?"
+	pattern := regexp.MustCompile(`data: /message\?`)
+	replacement := fmt.Sprintf("data: /proxy/%s/%s/message?", targetScheme, targetHost)
+	return pattern.ReplaceAll(content, []byte(replacement))
+}
+
+// streamSSEWithRewrite handles SSE streaming with real-time rewriting
+func (ps *ProxyServer) streamSSEWithRewrite(w http.ResponseWriter, reader io.Reader, targetScheme, targetHost string) {
+	scanner := bufio.NewScanner(reader)
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		// Fallback to reading all and writing at once if flushing isn't supported
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return
+		}
+		rewritten := rewriteSSEContent(body, targetScheme, targetHost)
+		w.Write(rewritten)
+		return
+	}
+
+	// Pattern to match SSE data lines that need rewriting
+	dataPattern := regexp.MustCompile(`^data: /message\?`)
+	replacement := fmt.Sprintf("data: /proxy/%s/%s/message?", targetScheme, targetHost)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Rewrite data lines containing "/message?"
+		if dataPattern.MatchString(line) {
+			line = dataPattern.ReplaceAllString(line, replacement)
+		}
+
+		// Write the line with proper SSE line ending
+		fmt.Fprintf(w, "%s\n", line)
+
+		// Flush after each line for real-time streaming
+		flusher.Flush()
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("Error reading SSE stream: %v", err)
+	}
+}
+
+// proxyHandler handles the main proxy logic for /proxy/<scheme>/<host>/<path>
+func (ps *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
+	// Parse the proxy URL pattern: /proxy/(https?)/([^/]+)(/.*)?
+	pathRegex := regexp.MustCompile(`^/proxy/(https?)/([^/]+)(/.*)?$`)
 	matches := pathRegex.FindStringSubmatch(r.URL.Path)
 
-	if len(matches) < 2 {
-		http.Error(w, "Invalid path format. Expected: /mcp-server-name/...", http.StatusBadRequest)
+	if len(matches) < 3 {
+		http.Error(w, "Invalid proxy URL format. Use: /proxy/<scheme>/<host>/<path>", http.StatusBadRequest)
+		ps.logRequest(r, http.StatusBadRequest, "")
 		return
 	}
 
-	serverName := matches[1]
-	remainingPath := ""
-	if len(matches) > 2 {
-		remainingPath = matches[2]
+	targetScheme := matches[1]
+	targetHost := matches[2]
+	targetPath := "/"
+	if len(matches) > 3 && matches[3] != "" {
+		targetPath = matches[3]
 	}
 
-	config, exists := p.getServerConfig(serverName)
-	if !exists {
-		http.Error(w, fmt.Sprintf("MCP server '%s' not found", serverName), http.StatusNotFound)
-		return
-	}
-
-	log.Printf("Forwarding request to %s (transport: %s, path: %s)", serverName, config.Transport, remainingPath)
-
-	// Handle different transport protocols
-	switch strings.ToLower(config.Transport) {
-	case "websocket", "ws":
-		p.handleWebSocket(w, r, config, remainingPath)
-	case "sse", "server-sent-events":
-		p.handleSSE(w, r, config, remainingPath)
-	case "http", "https":
-		fallthrough
-	default:
-		p.handleHTTP(w, r, config, remainingPath)
-	}
-}
-
-func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, config *ServerConfig, remainingPath string) {
-	targetURL, err := url.Parse(config.HTTPUrl)
-	if err != nil {
-		http.Error(w, "Invalid target URL", http.StatusInternalServerError)
-		return
-	}
-
-	// Create new request URL
-	targetURL.Path = "/" + remainingPath
-	targetURL.RawQuery = r.URL.RawQuery
-
-	// Create reverse proxy
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-
-	// Customize the director to handle MCP-specific headers
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-
-		// Add MCP-specific headers
-		req.Header.Set("X-MCP-Proxy", "true")
-		req.Header.Set("X-Original-Host", r.Host)
-
-		// Preserve important headers
-		if userAgent := r.Header.Get("User-Agent"); userAgent != "" {
-			req.Header.Set("User-Agent", userAgent)
-		}
-
-		// Handle MCP protocol headers
-		if mcpVersion := r.Header.Get("MCP-Version"); mcpVersion != "" {
-			req.Header.Set("MCP-Version", mcpVersion)
-		}
-	}
-
-	// Handle errors
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("Proxy error for %s: %v", config.Name, err)
-		http.Error(w, "Upstream server error", http.StatusBadGateway)
-	}
-
-	proxy.ServeHTTP(w, r)
-}
-
-func (p *ProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Request, config *ServerConfig, remainingPath string) {
-	// Check if this is a WebSocket upgrade request
-	if !websocket.IsWebSocketUpgrade(r) {
-		http.Error(w, "Expected WebSocket upgrade", http.StatusBadRequest)
-		return
-	}
-
-	// Construct target WebSocket URL
-	targetURL := config.WSUrl
-	if remainingPath != "" {
-		targetURL = strings.TrimSuffix(targetURL, "/") + "/" + remainingPath
-	}
+	// Build target URL
+	targetURL := fmt.Sprintf("%s://%s%s", targetScheme, targetHost, targetPath)
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
 	}
 
-	// Upgrade client connection
-	clientConn, err := p.upgrader.Upgrade(w, r, nil)
+	upstream := fmt.Sprintf("%s://%s", targetScheme, targetHost)
+	ps.logRequest(r, 200, upstream) // Log before processing
+
+	// Create the proxy request
+	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
 	if err != nil {
-		log.Printf("Failed to upgrade client connection: %v", err)
-		return
-	}
-	defer clientConn.Close()
-
-	// Connect to target server
-	targetConn, _, err := websocket.DefaultDialer.Dial(targetURL, r.Header)
-	if err != nil {
-		log.Printf("Failed to connect to target WebSocket: %v", err)
-		return
-	}
-	defer targetConn.Close()
-
-	log.Printf("WebSocket proxy established: client <-> %s", config.Name)
-
-	// Bidirectional message forwarding
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// Forward messages from client to target
-	go func() {
-		defer wg.Done()
-		for {
-			messageType, message, err := clientConn.ReadMessage()
-			if err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					log.Printf("Client connection error: %v", err)
-				}
-				break
-			}
-
-			if err := targetConn.WriteMessage(messageType, message); err != nil {
-				log.Printf("Error forwarding to target: %v", err)
-				break
-			}
-		}
-	}()
-
-	// Forward messages from target to client
-	go func() {
-		defer wg.Done()
-		for {
-			messageType, message, err := targetConn.ReadMessage()
-			if err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					log.Printf("Target connection error: %v", err)
-				}
-				break
-			}
-
-			if err := clientConn.WriteMessage(messageType, message); err != nil {
-				log.Printf("Error forwarding to client: %v", err)
-				break
-			}
-		}
-	}()
-
-	wg.Wait()
-	log.Printf("WebSocket proxy connection closed for %s", config.Name)
-}
-
-func (p *ProxyServer) handleSSE(w http.ResponseWriter, r *http.Request, config *ServerConfig, remainingPath string) {
-	// Construct target SSE URL
-	targetURL := config.SSEUrl
-	if remainingPath != "" {
-		targetURL = strings.TrimSuffix(targetURL, "/") + "/" + remainingPath
-	}
-	if r.URL.RawQuery != "" {
-		targetURL += "?" + r.URL.RawQuery
-	}
-
-	// Create request to target server
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
-	if err != nil {
-		http.Error(w, "Failed to create request", http.StatusInternalServerError)
+		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 		return
 	}
 
-	// Copy headers
-	for key, values := range r.Header {
-		for _, value := range values {
-			req.Header.Add(key, value)
+	// Set proxy headers (matching nginx config)
+	sniHost := extractSNIHost(targetHost)
+	proxyReq.Host = sniHost
+	proxyReq.Header.Set("Host", sniHost)
+	proxyReq.Header.Set("X-Forwarded-For", r.RemoteAddr)
+	proxyReq.Header.Set("X-Forwarded-Proto", "https") // assuming we're listening on http
+	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
+
+	// Copy specific headers from original request
+	headersToForward := []string{
+		"Authorization", "Content-Type", "User-Agent", "Cookie",
+	}
+	for _, header := range headersToForward {
+		if value := r.Header.Get(header); value != "" {
+			proxyReq.Header.Set(header, value)
 		}
 	}
 
-	// Make request to target
-	client := &http.Client{
-		Timeout: 0, // No timeout for SSE
-	}
+	// Don't forward connection-related headers
+	proxyReq.Header.Del("Connection")
+	proxyReq.Header.Del("Upgrade")
+	proxyReq.Header.Del("Accept-Encoding")
 
-	resp, err := client.Do(req)
+	// Make the request
+	resp, err := ps.client.Do(proxyReq)
 	if err != nil {
-		http.Error(w, "Failed to connect to target", http.StatusBadGateway)
+		http.Error(w, "Proxy request failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Set SSE headers
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	// Set CORS headers (matching nginx config)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Length,Content-Range")
+	w.Header().Set("X-Accel-Buffering", "no")
 
-	// Copy other headers from response
+	// Copy response headers, but ensure SSE-specific headers are set correctly
 	for key, values := range resp.Header {
-		if key != "Content-Length" {
-			for _, value := range values {
-				w.Header().Add(key, value)
-			}
+		// Skip headers that might interfere with SSE streaming
+		if strings.ToLower(key) == "content-length" {
+			continue // Don't set content-length for streaming responses
 		}
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	// Ensure proper SSE headers
+	if strings.Contains(contentType, "text/event-stream") {
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Del("Content-Length") // Remove content-length for streaming
 	}
 
 	w.WriteHeader(resp.StatusCode)
 
-	// Stream response
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
-		return
+	// Handle SSE content rewriting for text/event-stream
+	if strings.Contains(contentType, "text/event-stream") {
+		// For SSE, we need to stream and rewrite line by line
+		ps.streamSSEWithRewrite(w, resp.Body, targetScheme, targetHost)
+	} else {
+		// For non-SSE content, stream directly
+		io.Copy(w, resp.Body)
 	}
+}
 
-	buffer := make([]byte, 4096)
-	for {
-		n, err := resp.Body.Read(buffer)
-		if n > 0 {
-			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
-				log.Printf("Error writing to client: %v", writeErr)
-				break
-			}
-			flusher.Flush()
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			log.Printf("Error reading from target: %v", err)
-			break
-		}
-	}
+// optionsHandler handles CORS preflight requests
+func (ps *ProxyServer) optionsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
+	w.Header().Set("Access-Control-Max-Age", "86400")
+	w.WriteHeader(http.StatusOK)
 }
 
 func main() {
-	proxy := NewProxyServer()
+	server := NewProxyServer()
 
-	// Example server configurations
-	// In production, these would be loaded from environment variables or config file
-	proxy.RegisterServer("mcp-server-1", &ServerConfig{
-		Name:      "mcp-server-1",
-		HTTPUrl:   getEnvOrDefault("MCP_SERVER_1_HTTP", "http://localhost:8001"),
-		WSUrl:     getEnvOrDefault("MCP_SERVER_1_WS", "ws://localhost:8001/ws"),
-		SSEUrl:    getEnvOrDefault("MCP_SERVER_1_SSE", "http://localhost:8001/sse"),
-		Transport: getEnvOrDefault("MCP_SERVER_1_TRANSPORT", "http"),
-	})
-
-	proxy.RegisterServer("mcp-server-2", &ServerConfig{
-		Name:      "mcp-server-2",
-		HTTPUrl:   getEnvOrDefault("MCP_SERVER_2_HTTP", "http://localhost:8002"),
-		WSUrl:     getEnvOrDefault("MCP_SERVER_2_WS", "ws://localhost:8002/ws"),
-		SSEUrl:    getEnvOrDefault("MCP_SERVER_2_SSE", "http://localhost:8002/sse"),
-		Transport: getEnvOrDefault("MCP_SERVER_2_TRANSPORT", "websocket"),
-	})
-
-	proxy.RegisterServer("mcp-server-3", &ServerConfig{
-		Name:      "mcp-server-3",
-		HTTPUrl:   getEnvOrDefault("MCP_SERVER_3_HTTP", "http://localhost:8003"),
-		WSUrl:     getEnvOrDefault("MCP_SERVER_3_WS", "ws://localhost:8003/ws"),
-		SSEUrl:    getEnvOrDefault("MCP_SERVER_3_SSE", "http://localhost:8003/sse"),
-		Transport: getEnvOrDefault("MCP_SERVER_3_TRANSPORT", "sse"),
-	})
+	mux := http.NewServeMux()
 
 	// Health check endpoint
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `{"status":"healthy","timestamp":"`)
-		fmt.Fprint(w, time.Now().Format(time.RFC3339))
-		fmt.Fprint(w, `"}`)
-	})
+	mux.HandleFunc("/health", server.healthHandler)
 
-	// Status endpoint
-	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		proxy.serversMu.RLock()
-		defer proxy.serversMu.RUnlock()
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-
-		fmt.Fprint(w, `{"servers":{`)
-		first := true
-		for name, config := range proxy.servers {
-			if !first {
-				fmt.Fprint(w, ",")
-			}
-			first = false
-			fmt.Fprintf(w, `"%s":{"transport":"%s","http":"%s","ws":"%s","sse":"%s"}`,
-				name, config.Transport, config.HTTPUrl, config.WSUrl, config.SSEUrl)
+	// Handle CORS preflight for all routes
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			server.optionsHandler(w, r)
+			return
 		}
-		fmt.Fprint(w, `}}`)
+
+		// Route proxy requests
+		if strings.HasPrefix(r.URL.Path, "/proxy/") {
+			server.proxyHandler(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
 	})
 
-	// All other requests go through the proxy
-	http.Handle("/", proxy)
-
-	port := getEnvOrDefault("PORT", "8080")
-	server := &http.Server{
-		Addr:           ":" + port,
-		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   30 * time.Second,
-		IdleTimeout:    120 * time.Second,
-		MaxHeaderBytes: 1 << 20,
+	// Create server with timeouts
+	httpServer := &http.Server{
+		Addr:         ":8080",
+		Handler:      mux,
+		ReadTimeout:  time.Hour, // matching nginx proxy_read_timeout
+		WriteTimeout: time.Hour, // matching nginx proxy_send_timeout
+		IdleTimeout:  2 * time.Minute,
 	}
 
-	// Graceful shutdown
-	go func() {
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		<-sigChan
+	log.Printf("Starting MCP proxy server on :8080")
+	log.Printf("Health check available at: http://localhost:8080/health")
+	log.Printf("Proxy format: http://localhost:8080/proxy/<scheme>/<host>/<path>")
+	log.Printf("Example: http://localhost:8080/proxy/https/api.example.com/v1/endpoint")
 
-		log.Println("Shutting down proxy server...")
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		if err := server.Shutdown(ctx); err != nil {
-			log.Printf("Server shutdown error: %v", err)
-		}
-	}()
-
-	log.Printf("MCP Proxy Server starting on port %s", port)
-	log.Printf("Health check: http://localhost:%s/health", port)
-	log.Printf("Status: http://localhost:%s/status", port)
-
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}
-}
-
-func getEnvOrDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
 }

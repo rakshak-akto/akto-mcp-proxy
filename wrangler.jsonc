@@ -1,6 +1,7 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "akto-mcp-proxy",
+	"account_id": "53a10bdb35f546522193c9670ad3e7e5",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-06-23",
 	"compatibility_flags": [
@@ -17,7 +18,7 @@
 	},
 	"containers": [
 		{
-			"name": "golang-server",
+			"name": "mcp-proxy-server",
 			"class_name": "Backend",
 			"image": "./Dockerfile",
 			"max_instances": 3

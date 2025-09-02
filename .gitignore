@@ -16,6 +16,7 @@ coverage
 # Dependency directories
 
 node_modules/
+package-lock.json
 jspm_packages/
 
 # Optional npm cache directory
@@ -60,11 +61,15 @@ jspm_packages/
 .dev.vars
 .wrangler/
 
-# IDE files (IntelliJ)
+# IDE files
+.vscode/
 .idea/
+
 
 # go build files
 go.sum
 
 # Build file
 container_src/main
+scripts/
+*.bkp

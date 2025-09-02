@@ -15,7 +15,8 @@
 		"wrangler": "^4.21.0"
 	},
 	"dependencies": {
-		"@cloudflare/containers": "^0.0.12"
+		"@cloudflare/containers": "^0.0.12",
+		"eventsource": "^4.0.0"
 	},
 	"cloudflare": {
 		"label": "Containers Starter",
