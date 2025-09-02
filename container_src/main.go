@@ -89,7 +89,27 @@ func (ps *ProxyServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("healthy\n"))
 }
 
-// extractSNIHost extracts the host part for SNI (removes port)
+// getRequestScheme determines the scheme of the incoming request
+func getRequestScheme(r *http.Request) string {
+	// Check X-Forwarded-Proto header (common when behind a proxy/load balancer)
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return proto
+	}
+
+	// Check if TLS is being used
+	if r.TLS != nil {
+		return "https"
+	}
+
+	// Check X-Forwarded-SSL header (some proxies use this)
+	if r.Header.Get("X-Forwarded-SSL") == "on" {
+		return "https"
+	}
+
+	// Default to http
+	return "http"
+}
+
 func extractSNIHost(hostPort string) string {
 	if host, _, err := net.SplitHostPort(hostPort); err == nil {
 		return host
@@ -178,26 +198,35 @@ func (ps *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 		return
 	}
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
 
 	// Set proxy headers (matching nginx config)
 	sniHost := extractSNIHost(targetHost)
 	proxyReq.Host = sniHost
 	proxyReq.Header.Set("Host", sniHost)
 	proxyReq.Header.Set("X-Forwarded-For", r.RemoteAddr)
-	proxyReq.Header.Set("X-Forwarded-Proto", scheme)
+	proxyReq.Header.Set("X-Forwarded-Proto", getRequestScheme(r))
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
 
 	// Copy specific headers from original request
 	headersToForward := []string{
 		"Authorization", "Content-Type", "User-Agent", "Cookie",
+		"Accept", "Accept-Language", "Accept-Encoding",
+		// MCP-specific headers
+		"mcp-session-id", "mcp-protocol-version", "x-mcp-proxy-auth",
 	}
 	for _, header := range headersToForward {
 		if value := r.Header.Get(header); value != "" {
 			proxyReq.Header.Set(header, value)
+		}
+	}
+
+	// Forward all custom headers that might be MCP-related
+	for name, values := range r.Header {
+		lowerName := strings.ToLower(name)
+		if strings.HasPrefix(lowerName, "x-") || strings.HasPrefix(lowerName, "mcp-") {
+			for _, value := range values {
+				proxyReq.Header.Add(name, value)
+			}
 		}
 	}
 
@@ -217,13 +246,14 @@ func (ps *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
 	// Set CORS headers (matching nginx config)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Credentials", "true")
-	w.Header().Set("Access-Control-Expose-Headers", "Content-Length,Content-Range")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Length,Content-Range,mcp-session-id")
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	// Copy response headers, but ensure SSE-specific headers are set correctly
 	for key, values := range resp.Header {
 		// Skip headers that might interfere with SSE streaming
-		if strings.ToLower(key) == "content-length" {
+		lowerKey := strings.ToLower(key)
+		if lowerKey == "content-length" {
 			continue // Don't set content-length for streaming responses
 		}
 		for _, value := range values {
@@ -256,7 +286,8 @@ func (ps *ProxyServer) optionsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Credentials", "true")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With, mcp-session-id, mcp-protocol-version, x-mcp-proxy-auth, Accept, Accept-Language")
+	w.Header().Set("Access-Control-Expose-Headers", "mcp-session-id, Content-Length, Content-Range")
 	w.Header().Set("Access-Control-Max-Age", "86400")
 	w.WriteHeader(http.StatusOK)
 }

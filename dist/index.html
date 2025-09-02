@@ -13,12 +13,12 @@
     <h1>Health Check</h1>
     <div x-show="loading">Loading...</div>
     <div x-show="error" x-text="error" style="color: red;"></div>
-    <ul x-show="!loading && !error">
+    <div x-show="!loading && !error">
       <span x-text="health"></span>
-    </ul>
+    </div>
 
-    <div x-show="!loading && !error && health.length === 0">
-      No health found.
+    <div x-show="!loading && !error && health === ''">
+      No health data found.
     </div>
   </div>
 
@@ -38,7 +38,8 @@
             if (!response.ok) {
               throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
-            this.health = await response.json();
+            
+            this.health = await response.text();
           } catch (err) {
             this.error = err.message;
           } finally {
