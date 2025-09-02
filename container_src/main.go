@@ -178,13 +178,16 @@ func (ps *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 		return
 	}
+	scheme := "http"
+    if r.TLS != nil {
+        scheme = "https"
 
 	// Set proxy headers (matching nginx config)
 	sniHost := extractSNIHost(targetHost)
 	proxyReq.Host = sniHost
 	proxyReq.Header.Set("Host", sniHost)
 	proxyReq.Header.Set("X-Forwarded-For", r.RemoteAddr)
-	proxyReq.Header.Set("X-Forwarded-Proto", "https") // assuming we're listening on http
+	proxyReq.Header.Set("X-Forwarded-Proto", scheme)
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
 
 	// Copy specific headers from original request
