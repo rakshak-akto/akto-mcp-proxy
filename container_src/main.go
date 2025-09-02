@@ -179,8 +179,9 @@ func (ps *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scheme := "http"
-    if r.TLS != nil {
-        scheme = "https"
+	if r.TLS != nil {
+		scheme = "https"
+	}
 
 	// Set proxy headers (matching nginx config)
 	sniHost := extractSNIHost(targetHost)
