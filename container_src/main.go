@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -13,6 +15,10 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	// MCP threat detection imports
+	mcpclient "github.com/akto-api-security/akto/libs/mcp-proxy/mcp-threat/client"
+	"github.com/akto-api-security/akto/libs/mcp-proxy/mcp-threat/config"
 )
 
 // LogEntry represents the JSON log format matching nginx
@@ -27,8 +33,9 @@ type LogEntry struct {
 
 // ProxyServer holds the server configuration
 type ProxyServer struct {
-	logger *log.Logger
-	client *http.Client
+	logger    *log.Logger
+	client    *http.Client
+	validator *mcpclient.MCPValidator // Reuse validator instance
 }
 
 // NewProxyServer creates a new proxy server instance
@@ -53,9 +60,46 @@ func NewProxyServer() *ProxyServer {
 		// Remove global timeout for SSE streaming
 	}
 
+	// Check and log MCP_LLM_API_KEY status
+	apiKey := os.Getenv("MCP_LLM_API_KEY")
+	if apiKey == "" {
+		log.Printf("ERROR: MCP_LLM_API_KEY environment variable is not set! MCP threat detection will be disabled.")
+		log.Printf("Please set MCP_LLM_API_KEY via Cloudflare Worker configuration or container environment.")
+	} else {
+		// Mask the API key for security (show first 8 chars only)
+		maskedKey := apiKey
+		if len(apiKey) > 8 {
+			maskedKey = apiKey[:8] + "..."
+		}
+		log.Printf("MCP_LLM_API_KEY received successfully: %s", maskedKey)
+	}
+
+	// Log other environment variables
+	if debugMode := os.Getenv("DEBUG"); debugMode != "" {
+		log.Printf("DEBUG mode: %s", debugMode)
+	}
+	if onnxPath := os.Getenv("LIBONNX_RUNTIME_PATH"); onnxPath != "" {
+		log.Printf("LIBONNX_RUNTIME_PATH: %s", onnxPath)
+	}
+
+	// Initialize MCP validator once at startup (more resource efficient)
+	var validator *mcpclient.MCPValidator
+	config, err := config.LoadConfigFromEnv()
+	if err != nil {
+		log.Printf("Failed to load MCP config: %v", err)
+	} else {
+		validator, err = mcpclient.NewMCPValidatorWithConfig(config)
+		if err != nil {
+			log.Printf("Failed to create MCP validator: %v", err)
+		} else {
+			log.Printf("MCP validator initialized successfully")
+		}
+	}
+
 	return &ProxyServer{
-		logger: log.New(os.Stdout, "", 0),
-		client: client,
+		logger:    log.New(os.Stdout, "", 0),
+		client:    client,
+		validator: validator,
 	}
 }
 
@@ -166,6 +210,109 @@ func (ps *ProxyServer) streamSSEWithRewrite(w http.ResponseWriter, reader io.Rea
 
 // proxyHandler handles the main proxy logic for /proxy/<scheme>/<host>/<path>
 func (ps *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
+	// Reduce verbose logging for better performance
+	if os.Getenv("DEBUG") == "true" {
+		log.Printf("Received request r.URL.Path: %v", r.URL.Path)
+	}
+
+	// Use singleton validator if available (much more resource efficient)
+	if ps.validator != nil {
+		// Read request body for validation
+		var bodyContent []byte
+		if r.Body != nil {
+			bodyContent, _ = io.ReadAll(r.Body)
+			// Restore body for proxying
+			r.Body = io.NopCloser(bytes.NewReader(bodyContent))
+		}
+
+		// Extract headers as map
+		headers := make(map[string]string)
+		for key, values := range r.Header {
+			if len(values) > 0 {
+				headers[key] = values[0]
+			}
+		}
+
+		// Log request details before validation
+		log.Printf("REQUEST VALIDATION - Method: %s, Path: %s, URL: %s, Query: %s",
+			r.Method, r.URL.Path, r.URL.String(), r.URL.Query().Encode())
+		if len(headers) > 0 {
+			log.Printf("REQUEST HEADERS: %v", headers)
+		}
+		if len(bodyContent) > 0 {
+			log.Printf("REQUEST BODY: %s", string(bodyContent))
+		}
+
+		// Construct mcpPayload from actual request
+		ctx := context.Background()
+		mcpPayload := map[string]interface{}{
+			"method": r.Method,
+			"path":   r.URL.Path,
+			"params": map[string]interface{}{
+				"url":     r.URL.String(),
+				"headers": headers,
+				"body":    string(bodyContent),
+				"query":   r.URL.Query().Encode(),
+			},
+		}
+
+		// Optional tool description based on path
+		toolDescription := fmt.Sprintf("HTTP %s request to %s", r.Method, r.URL.Path)
+
+		response := ps.validator.Validate(ctx, mcpPayload, &toolDescription)
+
+		if response.Success {
+			// Log validation result
+			log.Printf("MCP Validation Result - Malicious: %v, Confidence: %.2f, PolicyAction: %s",
+				response.Verdict.IsMaliciousRequest,
+				response.Verdict.Confidence,
+				response.Verdict.PolicyAction)
+
+			// Use PolicyAction to determine what to do
+			switch response.Verdict.PolicyAction {
+			case "block":
+				// Create detailed response with security information
+				securityResponse := map[string]interface{}{
+					"error": "Request blocked by security policy",
+					"details": map[string]interface{}{
+						"malicious":  response.Verdict.IsMaliciousRequest,
+						"confidence": response.Verdict.Confidence,
+						"action":     response.Verdict.PolicyAction,
+						"timestamp":  time.Now().Format(time.RFC3339),
+					},
+				}
+
+				log.Printf("BLOCKED: Malicious request - Path: %s, Confidence: %.2f, Action: %s",
+					r.URL.Path,
+					response.Verdict.Confidence,
+					response.Verdict.PolicyAction)
+
+				// Return 403 with detailed JSON response
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(securityResponse)
+				ps.logRequest(r, http.StatusForbidden, "blocked")
+				return
+
+			case "allow":
+				log.Printf("ALLOWED: Request passed validation - Path: %s, Confidence: %.2f",
+					r.URL.Path, response.Verdict.Confidence)
+				// Continue with proxy request
+
+			case "monitor":
+				log.Printf("MONITORING: Suspicious request allowed - Path: %s, Confidence: %.2f",
+					r.URL.Path, response.Verdict.Confidence)
+				// Continue but log for monitoring
+
+			default:
+				log.Printf("UNKNOWN ACTION: %s - Allowing request", response.Verdict.PolicyAction)
+				// Default to allow if unknown action
+			}
+		} else {
+			log.Printf("MCP Validation failed: %v - Allowing request to proceed", response.Error)
+		}
+	}
+
 	// Parse the proxy URL pattern: /proxy/(https?)/([^/]+)(/.*)?
 	pathRegex := regexp.MustCompile(`^/proxy/(https?)/([^/]+)(/.*)?$`)
 	matches := pathRegex.FindStringSubmatch(r.URL.Path)
@@ -294,6 +441,11 @@ func (ps *ProxyServer) optionsHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	server := NewProxyServer()
+
+	// Ensure validator cleanup on shutdown
+	if server.validator != nil {
+		defer server.validator.Close()
+	}
 
 	mux := http.NewServeMux()
 

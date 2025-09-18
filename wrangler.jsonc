@@ -16,11 +16,19 @@
 			"/api/*" // API routes skip static asset handling
 		]
 	},
+	"vars": {
+		// Optional environment variables - defaults will be used if not set
+		"LIBONNX_RUNTIME_PATH": "/usr/local/lib/libonnxruntime.so",
+		"DEBUG": "false"
+	},
+	// MCP_LLM_API_KEY should be set as a secret via:
+	// wrangler secret put MCP_LLM_API_KEY
 	"containers": [
 		{
 			"name": "mcp-proxy-server",
 			"class_name": "Backend",
 			"image": "./Dockerfile",
+			"instance_type": "standard",
 			"max_instances": 3
 		}
 	],

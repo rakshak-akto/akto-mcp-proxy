@@ -71,5 +71,10 @@ go.sum
 
 # Build file
 container_src/main
+akto-mcp-proxy
 scripts/
 *.bkp
+
+tokenizer.json
+model.onnx
+secrets.env
