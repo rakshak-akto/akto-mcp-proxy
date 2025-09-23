@@ -40,6 +40,14 @@
 			}
 		]
 	},
+	"queues": {
+		"producers": [
+			{
+				"queue": "akto-traffic-queue",
+				"binding": "AKTO_TRAFFIC_QUEUE"
+			}
+		]
+	},
 	"migrations": [
 		{
 			"new_sqlite_classes": [
