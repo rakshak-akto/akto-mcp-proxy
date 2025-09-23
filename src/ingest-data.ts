@@ -1,57 +1,49 @@
 export interface IIngestDataRequest {
-  request: {
-    url: string;
-    method: string;
-    headers: Record<string, string>;
-    body: string;
-  };
-  response: {
-    headers: Record<string, string>;
-    status: number;
-    statusText: string;
-    body: string;
-  };
+  host: string;
+  url: string;
+  method: string;
+  requestHeaders: Record<string, string>;
+  requestBody: string;
+  responseHeaders: Record<string, string>;
+  responseStatus: number;
+  responseStatusText: string;
+  responseBody: string;
   time?: number;
 }
 
 export class IngestDataRequest implements IIngestDataRequest {
-  request: {
-    url: string;
-    method: string;
-    headers: Record<string, string>;
-    body: string;
-  };
-  response: {
-    headers: Record<string, string>;
-    status: number;
-    statusText: string;
-    body: string;
-  };
+  host: string;
+  url: string;
+  method: string;
+  requestHeaders: Record<string, string>;
+  requestBody: string;
+  responseHeaders: Record<string, string>;
+  responseStatus: number;
+  responseStatusText: string;
+  responseBody: string;
   time?: number;
 
   constructor(
+    host: string,
     url: string,
     method: string,
     requestHeaders: Record<string, string>,
     requestBody: string,
     responseHeaders: Record<string, string>,
-    status: number,
-    statusText: string,
+    responseStatus: number,
+    responseStatusText: string,
     responseBody: string,
     time?: number
   ) {
-    this.request = {
-      url,
-      method,
-      headers: requestHeaders,
-      body: requestBody
-    };
-    this.response = {
-      headers: responseHeaders,
-      status,
-      statusText,
-      body: responseBody
-    };
+    this.host = host;
+    this.url = url;
+    this.method = method;
+    this.requestHeaders = requestHeaders;
+    this.requestBody = requestBody;
+    this.responseHeaders = responseHeaders;
+    this.responseStatus = responseStatus;
+    this.responseStatusText = responseStatusText;
+    this.responseBody = responseBody;
     this.time = time;
   }
 }
@@ -70,15 +62,15 @@ export function ingestData(
   try {
     console.log("Input ingestDataRequest:", JSON.stringify(ingestDataRequest, null, 2));
 
-    const contentType = (ingestDataRequest.request.headers["content-type"] || "").toLowerCase();
+    const contentType = (ingestDataRequest.requestHeaders["content-type"] || "").toLowerCase();
     const isAllowed = isAllowedContentType(contentType);
-    const shouldCapture = isAllowed && isValidStatus(ingestDataRequest.response.status);
+    const shouldCapture = isAllowed && isValidStatus(ingestDataRequest.responseStatus);
 
     if (!shouldCapture) {
-      console.log("Traffic not captured. ContentType allowed:", isAllowed, "Status valid:", isValidStatus(ingestDataRequest.response.status));
+      console.log("Traffic not captured. ContentType allowed:", isAllowed, "Status valid:", isValidStatus(ingestDataRequest.responseStatus));
       return {
         success: true,
-        message: `Traffic not captured. ContentType allowed: ${isAllowed}, Status valid: ${isValidStatus(ingestDataRequest.response.status)}`,
+        message: `Traffic not captured. ContentType allowed: ${isAllowed}, Status valid: ${isValidStatus(ingestDataRequest.responseStatus)}`,
         captured: false
       };
     }
@@ -108,7 +100,7 @@ export function ingestData(
   }
 }
 
-export function isAllowedContentType(contentType: string): boolean {
+function isAllowedContentType(contentType: string): boolean {
   const allowedTypes = [
     "application/json",
     "application/xml",
@@ -120,25 +112,25 @@ export function isAllowedContentType(contentType: string): boolean {
   return allowedTypes.some(type => contentType.includes(type));
 }
 
-export function isValidStatus(status: number): boolean {
+function isValidStatus(status: number): boolean {
   return (status >= 200 && status < 300) || [301, 302, 304].includes(status);
 }
 
-export function generateLogFromPayload(payload: IngestDataRequest): string {
-  const url = new URL(payload.request.url);
+function generateLogFromPayload(payload: IngestDataRequest): string {
+  const url = new URL(payload.url);
   const timestamp = payload.time ? Math.round(payload.time / 1000) : Math.round(Date.now() / 1000);
   const value = {
     path: url.pathname,
-    requestHeaders: JSON.stringify(payload.request.headers),
-    responseHeaders: JSON.stringify(payload.response.headers),
-    method: payload.request.method,
-    requestPayload: payload.request.body,
-    responsePayload: payload.response.body,
-    ip: payload.request.headers["x-forwarded-for"] || payload.request.headers["cf-connecting-ip"] || payload.request.headers["x-real-ip"] || "",
+    requestHeaders: JSON.stringify(payload.requestHeaders),
+    responseHeaders: JSON.stringify(payload.responseHeaders),
+    method: payload.method,
+    requestPayload: payload.requestBody,
+    responsePayload: payload.responseBody,
+    ip: payload.requestHeaders["x-forwarded-for"] || payload.requestHeaders["cf-connecting-ip"] || payload.requestHeaders["x-real-ip"] || "",
     time: timestamp.toString(),
-    statusCode: payload.response.status.toString(),
+    statusCode: payload.responseStatus.toString(),
     type: "HTTP/1.1",
-    status: payload.response.statusText,
+    status: payload.responseStatusText,
     akto_account_id: "1000000",
     akto_vxlan_id: "0",
     is_pending: "false",
@@ -148,7 +140,7 @@ export function generateLogFromPayload(payload: IngestDataRequest): string {
   return JSON.stringify({ batchData: [value] });
 }
 
-export async function sendToQueue(logs: string, env: any): Promise<void> {
+async function sendToQueue(logs: string, env: any): Promise<void> {
   try {
     const data = JSON.parse(logs);
     if (!data.batchData || data.batchData.length === 0) return;

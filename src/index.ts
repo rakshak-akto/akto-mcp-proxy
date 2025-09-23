@@ -37,24 +37,93 @@ export default {
     }
 
     if (url.pathname === "/ingest-data") {
-      // create IngestDataPayload from request
-      // todo: handle auth and database abstractor token based ingestion
-      const requestBody = await request.json() as IIngestDataRequest;
+      try {
+        // create IngestDataPayload from request
+        // todo: handle auth and database abstractor token based ingestion
+        const requestBody = await request.json() as IIngestDataRequest;
 
-      const ingestDataRequest = new IngestDataRequest(
-        requestBody.request.url,
-        requestBody.request.method,
-        requestBody.request.headers,
-        requestBody.request.body,
-        requestBody.response.headers,
-        requestBody.response.status,
-        requestBody.response.statusText,
-        requestBody.response.body,
-        requestBody.time
-      );
+        // Validate required fields
+        if (!requestBody.host || !requestBody.url || !requestBody.method) {
+          return new Response(JSON.stringify({
+            error: "Missing required fields: host, url, and method are mandatory"
+          }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
 
-      ingestData(ingestDataRequest, env, ctx);
-      return new Response("Ingested", { status: 200 });
+        if (!requestBody.requestHeaders || !requestBody.responseHeaders) {
+          return new Response(JSON.stringify({
+            error: "Missing required fields: requestHeaders and responseHeaders are mandatory"
+          }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+
+        if (typeof requestBody.responseStatus !== 'number') {
+          return new Response(JSON.stringify({
+            error: "responseStatus must be a number"
+          }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+
+        // Ensure host is in requestHeaders
+        if (!requestBody.requestHeaders.host) {
+          requestBody.requestHeaders.host = requestBody.host;
+        }
+
+        const ingestDataRequest = new IngestDataRequest(
+          requestBody.host,
+          requestBody.url,
+          requestBody.method,
+          requestBody.requestHeaders,
+          requestBody.requestBody || "",
+          requestBody.responseHeaders,
+          requestBody.responseStatus,
+          requestBody.responseStatusText || "",
+          requestBody.responseBody || "",
+          requestBody.time
+        );
+
+        const result = ingestData(ingestDataRequest, env, ctx);
+
+        if (!result.success) {
+          return new Response(JSON.stringify({ error: result.message }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+
+        return new Response(JSON.stringify({
+          message: result.message,
+          captured: result.captured
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+
+      } catch (error) {
+        console.error("Error processing ingest-data request:", error);
+
+        if (error instanceof SyntaxError) {
+          return new Response(JSON.stringify({
+            error: "Invalid JSON in request body"
+          }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+
+        return new Response(JSON.stringify({
+          error: "Internal server error while processing request"
+        }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
     }
     
     const containerInstance = await getRandom(env.BACKEND, INSTANCE_COUNT);
