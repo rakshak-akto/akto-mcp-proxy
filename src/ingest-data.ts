@@ -54,6 +54,14 @@ export interface IngestDataResult {
   captured: boolean;
 }
 
+function normalizeHeaders(headers: Record<string, string>): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    normalized[key.toLowerCase()] = value;
+  }
+  return normalized;
+}
+
 export function ingestData(
   ingestDataRequest: IngestDataRequest,
   env: any,
@@ -62,7 +70,10 @@ export function ingestData(
   try {
     console.log("Input ingestDataRequest:", JSON.stringify(ingestDataRequest, null, 2));
 
-    const contentType = (ingestDataRequest.requestHeaders["content-type"] || "").toLowerCase();
+    // Normalize headers once for efficient lookups
+    const normalizedRequestHeaders = normalizeHeaders(ingestDataRequest.requestHeaders);
+
+    const contentType = (normalizedRequestHeaders["content-type"] || "").toLowerCase();
     const isAllowed = isAllowedContentType(contentType);
     const shouldCapture = isAllowed && isValidStatus(ingestDataRequest.responseStatus);
 
@@ -119,6 +130,10 @@ function isValidStatus(status: number): boolean {
 function generateLogFromPayload(payload: IngestDataRequest): string {
   const url = new URL(payload.url);
   const timestamp = payload.time ? Math.round(payload.time / 1000) : Math.round(Date.now() / 1000);
+
+  // Normalize request headers once for efficient lookups
+  const normalizedRequestHeaders = normalizeHeaders(payload.requestHeaders);
+
   const value = {
     path: url.pathname,
     requestHeaders: JSON.stringify(payload.requestHeaders),
@@ -126,7 +141,9 @@ function generateLogFromPayload(payload: IngestDataRequest): string {
     method: payload.method,
     requestPayload: payload.requestBody,
     responsePayload: payload.responseBody,
-    ip: payload.requestHeaders["x-forwarded-for"] || payload.requestHeaders["cf-connecting-ip"] || payload.requestHeaders["x-real-ip"] || "",
+    ip: normalizedRequestHeaders["x-forwarded-for"] ||
+        normalizedRequestHeaders["cf-connecting-ip"] ||
+        normalizedRequestHeaders["x-real-ip"] || "",
     time: timestamp.toString(),
     statusCode: payload.responseStatus.toString(),
     type: "HTTP/1.1",

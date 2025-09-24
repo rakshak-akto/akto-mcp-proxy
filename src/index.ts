@@ -2,6 +2,11 @@ import { Container, getRandom } from "@cloudflare/containers";
 import { collectTraffic, duplicateRequest } from "./akto-wrapper";
 import { ingestData, IngestDataRequest, IIngestDataRequest, IngestDataResult } from "./ingest-data";
 
+interface ContainerResponse {
+  ingestData?: IIngestDataRequest;
+  originalResponse?: any;
+}
+
 export class Backend extends Container {
   defaultPort = 8080; // pass requests to port 8080 in the container
   sleepAfter = "2h"; // only sleep a container if it hasn't gotten requests in 2 hours
@@ -127,6 +132,60 @@ export default {
     }
     
     const containerInstance = await getRandom(env.BACKEND, INSTANCE_COUNT);
-    return containerInstance.fetch(request);
+    const backendResponse = await containerInstance.fetch(request);
+
+    // Check if response contains ingestData
+    const contentType = backendResponse.headers.get('content-type');
+    if (contentType?.includes('application/json')) {
+      try {
+        // Clone the response to read it twice
+        const clonedResponse = backendResponse.clone();
+        const responseBody = await clonedResponse.json() as ContainerResponse;
+
+        // Check if response has ingestData structure
+        if (responseBody.ingestData && responseBody.originalResponse !== undefined) {
+          const ingestDataPayload = responseBody.ingestData;
+
+          // Create IngestDataRequest from the payload
+          const ingestDataRequest = new IngestDataRequest(
+            ingestDataPayload.host,
+            ingestDataPayload.url,
+            ingestDataPayload.method,
+            ingestDataPayload.requestHeaders,
+            ingestDataPayload.requestBody,
+            ingestDataPayload.responseHeaders,
+            ingestDataPayload.responseStatus,
+            ingestDataPayload.responseStatusText,
+            ingestDataPayload.responseBody,
+            ingestDataPayload.time
+          );
+
+          // Call ingestData with the payload
+          const result = ingestData(ingestDataRequest, env, ctx);
+
+          if (env.DEBUG === "true") {
+            console.log("Ingestion result:", result);
+          }
+
+          // Return only the originalResponse content
+          const originalResponse = responseBody.originalResponse;
+
+          // Create new response with original content and headers
+          return new Response(
+            typeof originalResponse === 'string' ? originalResponse : JSON.stringify(originalResponse),
+            {
+              status: backendResponse.status,
+              statusText: backendResponse.statusText,
+              headers: backendResponse.headers
+            }
+          );
+        }
+      } catch (error) {
+        console.error("Error processing ingest data:", error);
+        // Fall through to return original response
+      }
+    }
+
+    return backendResponse;
   },
 };

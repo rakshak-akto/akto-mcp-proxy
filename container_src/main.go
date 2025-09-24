@@ -32,15 +32,29 @@ type LogEntry struct {
 	Upstream string `json:"upstream"`
 }
 
+// IngestDataPayload represents the traffic data to be ingested (matches ingest-data.ts)
+type IngestDataPayload struct {
+	Host               string            `json:"host"`
+	URL                string            `json:"url"`
+	Method             string            `json:"method"`
+	RequestHeaders     map[string]string `json:"requestHeaders"`
+	RequestBody        string            `json:"requestBody"`
+	ResponseHeaders    map[string]string `json:"responseHeaders"`
+	ResponseStatus     int               `json:"responseStatus"`
+	ResponseStatusText string            `json:"responseStatusText"`
+	ResponseBody       string            `json:"responseBody"`
+	Time               int64             `json:"time,omitempty"`
+}
+
 // ProxyServer holds the server configuration
 type ProxyServer struct {
 	logger    *log.Logger
 	client    *http.Client
-	validator *mcpclient.MCPValidator // Reuse validator instance
+	validator *mcpclient.MCPValidator // Required validator instance
 }
 
 // NewProxyServer creates a new proxy server instance
-func NewProxyServer() *ProxyServer {
+func NewProxyServer() (*ProxyServer, error) {
 	// Create HTTP client with similar timeouts to nginx config
 	client := &http.Client{
 		Transport: &http.Transport{
@@ -61,47 +75,24 @@ func NewProxyServer() *ProxyServer {
 		// Remove global timeout for SSE streaming
 	}
 
-	// Check and log MCP_LLM_API_KEY status
-	apiKey := os.Getenv("MCP_LLM_API_KEY")
-	if apiKey == "" {
-		log.Printf("ERROR: MCP_LLM_API_KEY environment variable is not set! MCP threat detection will be disabled.")
-		log.Printf("Please set MCP_LLM_API_KEY via Cloudflare Worker configuration or container environment.")
-	} else {
-		// Mask the API key for security (show first 8 chars only)
-		maskedKey := apiKey
-		if len(apiKey) > 8 {
-			maskedKey = apiKey[:8] + "..."
-		}
-		log.Printf("MCP_LLM_API_KEY received successfully: %s", maskedKey)
-	}
-
-	// Log other environment variables
-	if debugMode := os.Getenv("DEBUG"); debugMode != "" {
-		log.Printf("DEBUG mode: %s", debugMode)
-	}
-	if onnxPath := os.Getenv("LIBONNX_RUNTIME_PATH"); onnxPath != "" {
-		log.Printf("LIBONNX_RUNTIME_PATH: %s", onnxPath)
-	}
-
-	// Initialize MCP validator once at startup (more resource efficient)
-	var validator *mcpclient.MCPValidator
+	// Initialize MCP validator once at startup (required)
 	config, err := config.LoadConfigFromEnv()
 	if err != nil {
-		log.Printf("Failed to load MCP config: %v", err)
-	} else {
-		validator, err = mcpclient.NewMCPValidatorWithConfig(config)
-		if err != nil {
-			log.Printf("Failed to create MCP validator: %v", err)
-		} else {
-			log.Printf("MCP validator initialized successfully")
-		}
+		return nil, fmt.Errorf("failed to load MCP config: %w", err)
 	}
+
+	validator, err := mcpclient.NewMCPValidatorWithConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create MCP validator: %w", err)
+	}
+
+	log.Printf("MCP validator initialized successfully")
 
 	return &ProxyServer{
 		logger:    log.New(os.Stdout, "", 0),
 		client:    client,
 		validator: validator,
-	}
+	}, nil
 }
 
 // logRequest logs in JSON format matching nginx
@@ -153,33 +144,56 @@ func (ps *ProxyServer) validatePayloadHandler(w http.ResponseWriter, r *http.Req
 	response, allowed := ps.validateRequest("", "", "", "", nil, []byte(requestBody.Payload))
 
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(ps.createValidationResult(response, allowed))
+}
 
-	if !allowed && response != nil {
-		result := map[string]interface{}{
-			"allowed":    false,
-			"malicious":  response.Verdict.IsMaliciousRequest,
-			"confidence": response.Verdict.Confidence,
-			"action":     response.Verdict.PolicyAction,
-			"reason":     response.Verdict.Reasoning,
-			"timestamp":  time.Now().Format(time.RFC3339),
-		}
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(result)
-		return
-	}
-
-	result := map[string]interface{}{
-		"allowed":   true,
+// createValidationResult creates a standardized validation result response
+func (ps *ProxyServer) createValidationResult(response *types.ValidationResponse, allowed bool) map[string]any {
+	result := map[string]any{
+		"allowed":   allowed,
 		"timestamp": time.Now().Format(time.RFC3339),
 	}
+
 	if response != nil {
-		result["confidence"] = response.Verdict.IsMaliciousRequest
+		result["malicious"] = response.Verdict.IsMaliciousRequest
 		result["confidence"] = response.Verdict.Confidence
 		result["action"] = response.Verdict.PolicyAction
 		result["reason"] = response.Verdict.Reasoning
 	}
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(result)
+
+	return result
+}
+
+// createIngestDataPayload creates an IngestDataPayload from request and response data
+func createIngestDataPayload(r *http.Request, proxyReq *http.Request, resp *http.Response, requestBody, responseBody string) *IngestDataPayload {
+	// Convert headers to map[string]string
+	requestHeaders := make(map[string]string)
+	for key, values := range proxyReq.Header {
+		if len(values) > 0 {
+			requestHeaders[key] = values[0] // Take first value
+		}
+	}
+
+	responseHeaders := make(map[string]string)
+	for key, values := range resp.Header {
+		if len(values) > 0 {
+			responseHeaders[key] = values[0] // Take first value
+		}
+	}
+
+	return &IngestDataPayload{
+		Host:               proxyReq.Host,
+		URL:                proxyReq.URL.String(),
+		Method:             proxyReq.Method,
+		RequestHeaders:     requestHeaders,
+		RequestBody:        requestBody,
+		ResponseBody:       responseBody,
+		ResponseHeaders:    responseHeaders,
+		ResponseStatus:     resp.StatusCode,
+		ResponseStatusText: resp.Status,
+		Time:               time.Now().UnixMilli(),
+	}
 }
 
 // getRequestScheme determines the scheme of the incoming request
@@ -411,6 +425,17 @@ func (ps *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
 	upstream := fmt.Sprintf("%s://%s", targetScheme, targetHost)
 	ps.logRequest(r, 200, upstream) // Log before processing
 
+	// Read request body for ingestion data
+	var requestBody string
+	if r.Body != nil {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err == nil {
+			requestBody = string(bodyBytes)
+			// Recreate request body for proxy
+			r.Body = io.NopCloser(strings.NewReader(requestBody))
+		}
+	}
+
 	// Create the proxy request
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
 	if err != nil {
@@ -492,11 +517,41 @@ func (ps *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Handle SSE content rewriting for text/event-stream
 	if strings.Contains(contentType, "text/event-stream") {
-		// For SSE, we need to stream and rewrite line by line
+		// For SSE, stream and rewrite line by line (no ingestion data capture)
 		ps.streamSSEWithRewrite(w, resp.Body, targetScheme, targetHost)
 	} else {
-		// For non-SSE content, stream directly
-		io.Copy(w, resp.Body)
+		// For non-SSE content, capture response body for ingestion data
+		responseBodyBytes, err := io.ReadAll(resp.Body)
+		var responseBody string
+		if err == nil {
+			responseBody = string(responseBodyBytes)
+		}
+
+		// Create ingestion data payload
+		ingestPayload := createIngestDataPayload(r, proxyReq, resp, requestBody, responseBody)
+
+		// Log the ingestion payload for debugging
+		if os.Getenv("DEBUG") == "true" {
+			payloadJSON, _ := json.Marshal(ingestPayload)
+			log.Printf("IngestDataPayload: %s", string(payloadJSON))
+		}
+
+		// Create combined response with original response + ingestion data
+		combinedResponse := map[string]any{
+			"originalResponse": json.RawMessage(responseBodyBytes),
+			"ingestData":       ingestPayload,
+		}
+
+		// Marshal combined response
+		combinedResponseBytes, err := json.Marshal(combinedResponse)
+		if err != nil {
+			// Fallback to original response if JSON marshaling fails
+			w.Write(responseBodyBytes)
+		} else {
+			// Set content type to JSON since we're now returning JSON
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(combinedResponseBytes)
+		}
 	}
 }
 
@@ -512,12 +567,14 @@ func (ps *ProxyServer) optionsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	server := NewProxyServer()
+	logEnvironmentVariables()
+	server, err := NewProxyServer()
+	if err != nil {
+		log.Fatalf("Failed to create proxy server: %v", err)
+	}
 
 	// Ensure validator cleanup on shutdown
-	if server.validator != nil {
-		defer server.validator.Close()
-	}
+	defer server.validator.Close()
 	{
 		// Test validator with a sample request (normal request)
 		bodyContent := []byte(`{"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"sampling":{},"roots":{"listChanged":true}},"clientInfo":{"name":"cursor","version":"0.16.1"}},"jsonrpc":"2.0","id":0}`)
@@ -570,5 +627,30 @@ func main() {
 
 	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
+	}
+}
+
+// logEnvironmentVariables logs the status of required environment variables
+func logEnvironmentVariables() {
+	// Check and log MCP_LLM_API_KEY status
+	apiKey := os.Getenv("MCP_LLM_API_KEY")
+	if apiKey == "" {
+		log.Printf("ERROR: MCP_LLM_API_KEY environment variable is not set! MCP threat detection will be disabled.")
+		log.Printf("Please set MCP_LLM_API_KEY via Cloudflare Worker configuration or container environment.")
+	} else {
+		// Mask the API key for security (show first 8 chars only)
+		maskedKey := apiKey
+		if len(apiKey) > 8 {
+			maskedKey = apiKey[:8] + "..."
+		}
+		log.Printf("MCP_LLM_API_KEY received successfully: %s", maskedKey)
+	}
+
+	// Log other environment variables
+	if debugMode := os.Getenv("DEBUG"); debugMode != "" {
+		log.Printf("DEBUG mode: %s", debugMode)
+	}
+	if onnxPath := os.Getenv("LIBONNX_RUNTIME_PATH"); onnxPath != "" {
+		log.Printf("LIBONNX_RUNTIME_PATH: %s", onnxPath)
 	}
 }
