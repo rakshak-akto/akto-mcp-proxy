@@ -45,6 +45,10 @@
 			{
 				"queue": "akto-traffic-queue",
 				"binding": "AKTO_TRAFFIC_QUEUE"
+			},
+			{
+				"queue": "akto-traffic-queue-dev",
+				"binding": "AKTO_TRAFFIC_QUEUE_DEV"
 			}
 		]
 	},

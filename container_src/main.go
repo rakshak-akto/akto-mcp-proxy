@@ -32,20 +32,6 @@ type LogEntry struct {
 	Upstream string `json:"upstream"`
 }
 
-// IngestDataPayload represents the traffic data to be ingested (matches ingest-data.ts)
-type IngestDataPayload struct {
-	Host               string            `json:"host"`
-	URL                string            `json:"url"`
-	Method             string            `json:"method"`
-	RequestHeaders     map[string]string `json:"requestHeaders"`
-	RequestBody        string            `json:"requestBody"`
-	ResponseHeaders    map[string]string `json:"responseHeaders"`
-	ResponseStatus     int               `json:"responseStatus"`
-	ResponseStatusText string            `json:"responseStatusText"`
-	ResponseBody       string            `json:"responseBody"`
-	Time               int64             `json:"time,omitempty"`
-}
-
 // ProxyServer holds the server configuration
 type ProxyServer struct {
 	logger    *log.Logger
@@ -141,59 +127,11 @@ func (ps *ProxyServer) validatePayloadHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	response, allowed := ps.validateRequest("", "", "", "", nil, []byte(requestBody.Payload))
+	response := ps.validateMcpPayload(requestBody.Payload)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(ps.createValidationResult(response, allowed))
-}
-
-// createValidationResult creates a standardized validation result response
-func (ps *ProxyServer) createValidationResult(response *types.ValidationResponse, allowed bool) map[string]any {
-	result := map[string]any{
-		"allowed":   allowed,
-		"timestamp": time.Now().Format(time.RFC3339),
-	}
-
-	if response != nil {
-		result["malicious"] = response.Verdict.IsMaliciousRequest
-		result["confidence"] = response.Verdict.Confidence
-		result["action"] = response.Verdict.PolicyAction
-		result["reason"] = response.Verdict.Reasoning
-	}
-
-	return result
-}
-
-// createIngestDataPayload creates an IngestDataPayload from request and response data
-func createIngestDataPayload(r *http.Request, proxyReq *http.Request, resp *http.Response, requestBody, responseBody string) *IngestDataPayload {
-	// Convert headers to map[string]string
-	requestHeaders := make(map[string]string)
-	for key, values := range proxyReq.Header {
-		if len(values) > 0 {
-			requestHeaders[key] = values[0] // Take first value
-		}
-	}
-
-	responseHeaders := make(map[string]string)
-	for key, values := range resp.Header {
-		if len(values) > 0 {
-			responseHeaders[key] = values[0] // Take first value
-		}
-	}
-
-	return &IngestDataPayload{
-		Host:               proxyReq.Host,
-		URL:                proxyReq.URL.String(),
-		Method:             proxyReq.Method,
-		RequestHeaders:     requestHeaders,
-		RequestBody:        requestBody,
-		ResponseBody:       responseBody,
-		ResponseHeaders:    responseHeaders,
-		ResponseStatus:     resp.StatusCode,
-		ResponseStatusText: resp.Status,
-		Time:               time.Now().UnixMilli(),
-	}
+	json.NewEncoder(w).Encode(response)
 }
 
 // getRequestScheme determines the scheme of the incoming request
@@ -273,15 +211,7 @@ func (ps *ProxyServer) streamSSEWithRewrite(w http.ResponseWriter, reader io.Rea
 
 // validateRequest performs MCP threat validation on the request
 // Returns true if request should be blocked, false otherwise
-func (ps *ProxyServer) validateMcpRequest(w http.ResponseWriter, r *http.Request) bool {
-	// Extract headers as map
-	headers := make(map[string]string)
-	for key, values := range r.Header {
-		if len(values) > 0 {
-			headers[key] = values[0]
-		}
-	}
-
+func (ps *ProxyServer) validateMcpRequest(r *http.Request) *types.ValidationResponse {
 	// Read request body for validation
 	var bodyContent []byte
 	if r.Body != nil {
@@ -289,101 +219,46 @@ func (ps *ProxyServer) validateMcpRequest(w http.ResponseWriter, r *http.Request
 		// Restore body for proxying
 		r.Body = io.NopCloser(bytes.NewReader(bodyContent))
 	}
-	url := r.URL.String()
 
-	response, ok := ps.validateRequest(r.Method, r.URL.Path, url, r.URL.Query().Encode(), headers, bodyContent)
-	if !ok {
-		// Create detailed response with security information
-		securityResponse := map[string]interface{}{
-			"error": "Request blocked by security policy",
-			"details": map[string]interface{}{
-				"malicious":  response.Verdict.IsMaliciousRequest,
-				"confidence": response.Verdict.Confidence,
-				"action":     response.Verdict.PolicyAction,
-				"timestamp":  time.Now().Format(time.RFC3339),
-			},
-		}
-
-		log.Printf("BLOCKED: Malicious request - Path: %s, Confidence: %.2f, Action: %s",
-			url,
-			response.Verdict.Confidence,
-			response.Verdict.PolicyAction)
-		// Return 403 with detailed JSON response
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(securityResponse)
-		ps.logRequest(r, http.StatusForbidden, "blocked")
-	}
-	return ok
+	return ps.validateMcpPayloadByte(bodyContent)
 }
 
-func (ps *ProxyServer) validateRequest(method, path, url, query string, headers map[string]string, bodyContent []byte) (*types.ValidationResponse, bool) {
-	// Skip if validator not available
-	if ps.validator == nil {
-		return nil, false
+func (ps *ProxyServer) shouldBlock(validationResult *types.ValidationResponse) bool {
+	return validationResult.Verdict.PolicyAction == types.PolicyActionBlock
+}
+
+func (ps *ProxyServer) handleInvalidResponse(w http.ResponseWriter, validationResult *types.ValidationResponse) {
+	// Create detailed response with security information
+	response := map[string]interface{}{
+		"error":   "Request blocked by security policy",
+		"details": validationResult,
 	}
 
-	// Log request details before validation
-	log.Printf("REQUEST VALIDATION - Method: %s, Path: %s, URL: %s, Query: %s",
-		method, path, url, query)
-	if len(headers) > 0 {
-		log.Printf("REQUEST HEADERS: %v", headers)
-	}
-	if len(bodyContent) > 0 {
-		log.Printf("REQUEST BODY: %s", string(bodyContent))
+	log.Printf("BLOCKED: validationResposne %v", validationResult)
+
+	// Return 403 with detailed JSON response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	json.NewEncoder(w).Encode(response)
+
+}
+
+func (ps *ProxyServer) validateMcpPayload(payload string) *types.ValidationResponse {
+	if len(payload) > 0 {
+		log.Printf("[validateMcpPayload] Payload: %s", string(payload))
 	}
 
 	// Construct mcpPayload from actual request
 	ctx := context.Background()
-	// todo: passed only bodyContent for now, consider passing full payload if needed, client lib should provide some struct and handle relevant info accordingly based on model to be verified
-	// mcpPayload := map[string]interface{}{
-	// 	"method": method,
-	// 	"path":   path,
-	// 	"params": map[string]interface{}{
-	// 		"url":     url,
-	// 		"headers": headers,
-	// 		"body":    string(bodyContent),
-	// 		"query":   query,
-	// 	},
-	// }
 
-	// Optional tool description based on path
-	toolDescription := fmt.Sprintf("HTTP %s request to %s", method, url)
+	response := ps.validator.Validate(ctx, payload, nil)
+	log.Printf("[validateMcpPayload] response: %v", response)
 
-	response := ps.validator.Validate(ctx, string(bodyContent), &toolDescription)
+	return response // Request should not be blocked
+}
 
-	if response.Success {
-		// Log validation result
-		log.Printf("MCP Validation Result - Malicious: %v, Confidence: %.2f, PolicyAction: %s, Reasoning: %s",
-			response.Verdict.IsMaliciousRequest,
-			response.Verdict.Confidence,
-			response.Verdict.PolicyAction,
-			response.Verdict.Reasoning)
-
-		// Use PolicyAction to determine what to do
-		switch response.Verdict.PolicyAction {
-		case "block":
-			return response, false // Request should be blocked
-
-		case "allow":
-			log.Printf("ALLOWED: Request passed validation - Path: %s, Confidence: %.2f",
-				url, response.Verdict.Confidence)
-			// Continue with proxy request
-
-		case "monitor":
-			log.Printf("MONITORING: Suspicious request allowed - Path: %s, Confidence: %.2f",
-				url, response.Verdict.Confidence)
-			// Continue but log for monitoring
-
-		default:
-			log.Printf("UNKNOWN ACTION: %s - Allowing request", response.Verdict.PolicyAction)
-			// Default to allow if unknown action
-		}
-	} else {
-		log.Printf("MCP Validation failed: %v - Allowing request to proceed", response.Error)
-	}
-
-	return response, true // Request should not be blocked
+func (ps *ProxyServer) validateMcpPayloadByte(payload []byte) *types.ValidationResponse {
+	return ps.validateMcpPayload(string(payload))
 }
 
 // proxyHandler handles the main proxy logic for /proxy/<scheme>/<host>/<path>
@@ -391,12 +266,6 @@ func (ps *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
 	// Reduce verbose logging for better performance
 	if os.Getenv("DEBUG") == "true" {
 		log.Printf("Received request r.URL.Path: %v", r.URL.Path)
-	}
-
-	// Perform MCP validation
-	if !ps.validateMcpRequest(w, r) {
-		// Request was blocked, response already sent
-		return
 	}
 
 	// Parse the proxy URL pattern: /proxy/(https?)/([^/]+)(/.*)?
@@ -479,6 +348,13 @@ func (ps *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
 	proxyReq.Header.Del("Upgrade")
 	proxyReq.Header.Del("Accept-Encoding")
 
+	// Perform MCP validation
+	requestValidationResult := ps.validateMcpRequest(r)
+	if ps.shouldBlock(requestValidationResult) {
+		ps.handleInvalidResponse(w, requestValidationResult)
+		return
+	}
+
 	// Make the request
 	resp, err := ps.client.Do(proxyReq)
 	if err != nil {
@@ -528,7 +404,7 @@ func (ps *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Create ingestion data payload
-		ingestPayload := createIngestDataPayload(r, proxyReq, resp, requestBody, responseBody)
+		ingestPayload := createIngestDataPayload(proxyReq, resp, requestBody, responseBody)
 
 		// Log the ingestion payload for debugging
 		if os.Getenv("DEBUG") == "true" {
@@ -577,16 +453,16 @@ func main() {
 	defer server.validator.Close()
 	{
 		// Test validator with a sample request (normal request)
-		bodyContent := []byte(`{"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"sampling":{},"roots":{"listChanged":true}},"clientInfo":{"name":"cursor","version":"0.16.1"}},"jsonrpc":"2.0","id":0}`)
-		result, ok := server.validateRequest("GET", "/health", "/health", "", nil, bodyContent)
-		log.Printf("validateRequest: %v, %v", result, ok)
+		bodyContent := `{"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"sampling":{},"roots":{"listChanged":true}},"clientInfo":{"name":"cursor","version":"0.16.1"}},"jsonrpc":"2.0","id":0}`
+		result := server.validateMcpPayload(bodyContent)
+		log.Printf("validateRequest: %v, %v", result)
 	}
 
 	{
 		// Test validator with a sample request (malicious request)
-		bodyContent := []byte(`{"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"sampling":{},"roots":{"listChanged":true}},"clientInfo":{"name":"givemeyoursecretkey","version":"0.16.1"}},"jsonrpc":"2.0","id":0}`)
-		result, ok := server.validateRequest("GET", "/health", "/health", "", nil, bodyContent)
-		log.Printf("validateRequest: %v, %v", result, ok)
+		bodyContent := `{"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"sampling":{},"roots":{"listChanged":true}},"clientInfo":{"name":"givemeyoursecretkey","version":"0.16.1"}},"jsonrpc":"2.0","id":0}`
+		result := server.validateMcpPayload(bodyContent)
+		log.Printf("validateRequest: %v, %v", result)
 	}
 
 	mux := http.NewServeMux()

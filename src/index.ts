@@ -1,6 +1,6 @@
 import { Container, getRandom } from "@cloudflare/containers";
 import { collectTraffic, duplicateRequest } from "./akto-wrapper";
-import { ingestData, IngestDataRequest, IIngestDataRequest, IngestDataResult } from "./ingest-data";
+import { ingestData, ingestDataDev, IngestDataRequest, IIngestDataRequest, IngestDataResult } from "./ingest-data";
 
 interface ContainerResponse {
   ingestData?: IIngestDataRequest;
@@ -18,7 +18,9 @@ export class Backend extends Container {
     this.envVars = {
       MCP_LLM_API_KEY: env.MCP_LLM_API_KEY || "",
       LIBONNX_RUNTIME_PATH: env.LIBONNX_RUNTIME_PATH || "/usr/local/lib/libonnxruntime.so",
-      DEBUG: env.DEBUG || "false"
+      DEBUG: env.DEBUG || "false",
+      THREAT_DETECTION_ENDPOINT: "https://tbs.akto.io/api/threat_detection/record_malicious_event",
+      THREAT_DETECTION_TOKEN: "",
     };
   }
 }
@@ -29,6 +31,9 @@ export interface Env {
   MCP_LLM_API_KEY?: string;
   LIBONNX_RUNTIME_PATH?: string;
   DEBUG?: string;
+  // Threat detection configuration
+  THREAT_DETECTION_ENDPOINT?: string;
+  THREAT_DETECTION_TOKEN?: string;
 }
 
 
@@ -41,8 +46,10 @@ export default {
       return new Response("OK", { status: 200 });
     }
 
-    if (url.pathname === "/ingest-data") {
+    if (url.pathname === "/ingest-data" || url.pathname === "/ingest-data-dev") {
       try {
+        const isDev = url.pathname === "/ingest-data-dev";
+
         // create IngestDataPayload from request
         // todo: handle auth and database abstractor token based ingestion
         const requestBody = await request.json() as IIngestDataRequest;
@@ -93,7 +100,9 @@ export default {
           requestBody.time
         );
 
-        const result = ingestData(ingestDataRequest, env, ctx);
+        const result = isDev
+          ? ingestDataDev(ingestDataRequest, env, ctx)
+          : ingestData(ingestDataRequest, env, ctx);
 
         if (!result.success) {
           return new Response(JSON.stringify({ error: result.message }), {
