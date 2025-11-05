@@ -10,7 +10,6 @@ interface ContainerResponse {
 export class Backend extends Container {
   defaultPort = 8080; // pass requests to port 8080 in the container
   sleepAfter = "2h"; // only sleep a container if it hasn't gotten requests in 2 hours
-  maxStartupTime = "60s"; // allow more time for container startup
   
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
@@ -20,7 +19,7 @@ export class Backend extends Container {
       LIBONNX_RUNTIME_PATH: env.LIBONNX_RUNTIME_PATH || "/usr/local/lib/libonnxruntime.so",
       DEBUG: env.DEBUG || "false",
       THREAT_DETECTION_ENDPOINT: "https://tbs.akto.io/api/threat_detection/record_malicious_event",
-      THREAT_DETECTION_TOKEN: "",
+      THREAT_DETECTION_TOKEN: "<TOKEN>",
     };
   }
 }

@@ -71,7 +71,7 @@ go.sum
 
 # Build file
 container_src/main
-akto-mcp-proxy
+akto-mcp-proxy-nginx
 scripts/
 *.bkp
 

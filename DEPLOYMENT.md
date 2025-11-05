@@ -98,17 +98,17 @@ wrangler deploy --env production
 
 1. Build the Docker image:
 ```bash
-docker build -f Dockerfile -t akto-mcp-proxy:latest .
+docker build -f Dockerfile -t akto-mcp-proxy-nginx:latest .
 ```
 
 2. Tag the image for your registry:
 ```bash
-docker tag akto-mcp-proxy:latest registry.example.com/akto-mcp-proxy:latest
+docker tag akto-mcp-proxy-nginx:latest registry.example.com/akto-mcp-proxy-nginx:latest
 ```
 
 3. Push to your registry:
 ```bash
-docker push registry.example.com/akto-mcp-proxy:latest
+docker push registry.example.com/akto-mcp-proxy-nginx:latest
 ```
 
 4. Deploy to Cloudflare Workers:

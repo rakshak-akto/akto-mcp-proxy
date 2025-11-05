@@ -1,4 +1,4 @@
-module akto-mcp-proxy
+module akto-mcp-proxy-nginx
 
 go 1.24.2
 

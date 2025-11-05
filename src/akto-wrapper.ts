@@ -163,8 +163,8 @@ export async function sendToQueue(logs: string, env: any): Promise<void> {
       body: JSON.stringify(item),
     }));
 
-    await env.AKTO_TRAFFIC_QUEUE.send(messages);
-    console.log(`Sent ${messages.length} message(s) to akto-traffic-queue`);
+    await env.AKTO_TRAFFIC_QUEUE_NGINX.send(messages);
+    console.log(`Sent ${messages.length} message(s) to akto-traffic-queue-nginx`);
   } catch (err) {
     console.error("Failed to send to queue:", err);
   }
