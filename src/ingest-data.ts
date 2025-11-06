@@ -9,6 +9,7 @@ export interface IIngestDataRequest {
   responseStatusText: string;
   responseBody: string;
   time?: number;
+  tag?: Record<string, string>;
 }
 
 export class IngestDataRequest implements IIngestDataRequest {
@@ -22,6 +23,7 @@ export class IngestDataRequest implements IIngestDataRequest {
   responseStatusText: string;
   responseBody: string;
   time?: number;
+  tag?: Record<string, string>;
 
   constructor(
     host: string,
@@ -33,7 +35,8 @@ export class IngestDataRequest implements IIngestDataRequest {
     responseStatus: number,
     responseStatusText: string,
     responseBody: string,
-    time?: number
+    time?: number,
+    tag?: Record<string, string>
   ) {
     this.host = host;
     this.url = url;
@@ -45,6 +48,7 @@ export class IngestDataRequest implements IIngestDataRequest {
     this.responseStatusText = responseStatusText;
     this.responseBody = responseBody;
     this.time = time;
+    this.tag = tag;
   }
 }
 
@@ -133,6 +137,12 @@ function generateLogFromPayload(payload: IngestDataRequest): string {
   // Normalize request headers once for efficient lookups
   const normalizedRequestHeaders = normalizeHeaders(payload.requestHeaders);
 
+  // Merge the service tag with any additional tags from the payload
+  const mergedTags = {
+    service: "cloudflare",
+    ...(payload.tag || {})
+  };
+
   const value = {
     path: url.pathname,
     requestHeaders: JSON.stringify(payload.requestHeaders),
@@ -151,7 +161,7 @@ function generateLogFromPayload(payload: IngestDataRequest): string {
     akto_vxlan_id: "0",
     is_pending: "false",
     source: "MIRRORING",
-    tag: "{\n  \"service\": \"cloudflare\"\n}"
+    tag: JSON.stringify(mergedTags, null, 2)
   };
   return JSON.stringify({ batchData: [value] });
 }
