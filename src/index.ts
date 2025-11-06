@@ -96,7 +96,8 @@ export default {
           requestBody.responseStatus,
           requestBody.responseStatusText || "",
           requestBody.responseBody || "",
-          requestBody.time
+          requestBody.time,
+          requestBody.tag
         );
 
         const result = isDev
@@ -165,7 +166,8 @@ export default {
             ingestDataPayload.responseStatus,
             ingestDataPayload.responseStatusText,
             ingestDataPayload.responseBody,
-            ingestDataPayload.time
+            ingestDataPayload.time,
+            ingestDataPayload.tag
           );
 
           // Call ingestData with the payload
