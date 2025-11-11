@@ -175,8 +175,8 @@ async function sendToQueue(logs: string, env: any): Promise<void> {
       body: JSON.stringify(item),
     }));
 
-    console.log(`Sending ${messages.length} message(s) to akto-traffic-queue-nginx:`, messages);
-    await env.AKTO_TRAFFIC_QUEUE_NGINX.send(messages);
+    console.log(`Sending ${messages.length} message(s) to akto-traffic-queue-ch-robinson:`, messages);
+    await env.AKTO_TRAFFIC_QUEUE_CH_ROBINSON.send(messages);
   } catch (err) {
     console.error("Failed to send to queue:", err);
   }
@@ -191,8 +191,8 @@ async function sendToQueueDev(logs: string, env: any): Promise<void> {
       body: JSON.stringify(item),
     }));
 
-    console.log(`Sending ${messages.length} message(s) to akto-traffic-queue-nginx-dev:`, messages);
-    await env.AKTO_TRAFFIC_QUEUE_NGINX_DEV.send(messages);
+    console.log(`Sending ${messages.length} message(s) to akto-traffic-queue-ch-robinson-dev:`, messages);
+    await env.AKTO_TRAFFIC_QUEUE_CH_ROBINSON_DEV.send(messages);
   } catch (err) {
     console.error("Failed to send to dev queue:", err);
   }
