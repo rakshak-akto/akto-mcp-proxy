@@ -1,6 +1,6 @@
 {
-	"name": "akto-mcp-proxy-ch-robinson",
-	"description": "Run a static frontend talking to a containerized backend on Cloudflare Workers",
+	"name": "akto-traffic-ingestion",
+	"description": "Traffic ingestion API for Akto on Cloudflare Workers",
 	"version": "0.0.3",
 	"private": true,
 	"scripts": {
@@ -10,20 +10,18 @@
 		"cf-typegen": "wrangler types"
 	},
 	"devDependencies": {
-		"@cloudflare/workers-types": "^4.20250506.0",
-		"typescript": "^5.5.2",
-		"wrangler": "^4.21.0"
+		"@types/node": "^24.10.0",
+		"typescript": "^5.9.3",
+		"wrangler": "^4.47.0"
 	},
 	"dependencies": {
-		"@cloudflare/containers": "^0.0.12",
-		"eventsource": "^4.0.0"
+		"hono": "^4.10.5"
 	},
 	"cloudflare": {
-		"label": "Containers Starter",
+		"label": "Akto Traffic Ingestion API",
 		"products": [
 			"Workers",
-			"Durable Objects",
-			"Containers"
+			"Queues"
 		],
 		"categories": [],
 		"icon_urls": [

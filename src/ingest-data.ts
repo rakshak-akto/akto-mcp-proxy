@@ -68,8 +68,6 @@ export function ingestData(
   ctx: ExecutionContext
 ): IngestDataResult {
   try {
-    console.log("Input ingestDataRequest:", JSON.stringify(ingestDataRequest, null, 2));
-
     // Normalize headers once for efficient lookups
     const normalizedRequestHeaders = normalizeHeaders(ingestDataRequest.requestHeaders);
 
@@ -78,7 +76,6 @@ export function ingestData(
     const shouldCapture = isAllowed && isValidStatus(ingestDataRequest.responseStatus);
 
     if (!shouldCapture) {
-      console.log("Traffic not captured. ContentType allowed:", isAllowed, "Status valid:", isValidStatus(ingestDataRequest.responseStatus));
       return {
         success: true,
         message: `Traffic not captured. ContentType allowed: ${isAllowed}, Status valid: ${isValidStatus(ingestDataRequest.responseStatus)}`,
@@ -165,99 +162,10 @@ async function sendToQueue(logs: string, env: any): Promise<void> {
       body: JSON.stringify(item),
     }));
 
-    console.log(`Sending ${messages.length} message(s) to akto-traffic-queue-ch-robinson:`, messages);
+    console.log(`Sending ${messages.length} message(s) to queue:`, JSON.stringify(messages, null, 2));
     await env.AKTO_TRAFFIC_QUEUE_CH_ROBINSON.send(messages);
+    console.log(`Successfully sent ${messages.length} message(s) to queue`);
   } catch (err) {
     console.error("Failed to send to queue:", err);
-  }
-}
-
-async function sendToQueueDev(logs: string, env: any): Promise<void> {
-  try {
-    const data = JSON.parse(logs);
-    if (!data.batchData || data.batchData.length === 0) return;
-
-    const messages = data.batchData.map((item: any) => ({
-      body: JSON.stringify(item),
-    }));
-
-    console.log(`Sending ${messages.length} message(s) to akto-traffic-queue-ch-robinson-dev:`, messages);
-    await env.AKTO_TRAFFIC_QUEUE_CH_ROBINSON_DEV.send(messages);
-  } catch (err) {
-    console.error("Failed to send to dev queue:", err);
-  }
-}
-
-export function ingestDataDev(
-  ingestDataRequest: IngestDataRequest,
-  env: any,
-  ctx: ExecutionContext
-): IngestDataResult {
-  try {
-    console.log("Input ingestDataRequest (dev):", JSON.stringify(ingestDataRequest, null, 2));
-
-    // Normalize headers once for efficient lookups
-    const normalizedRequestHeaders = normalizeHeaders(ingestDataRequest.requestHeaders);
-
-    const contentType = (normalizedRequestHeaders["content-type"] || "").toLowerCase();
-    const isAllowed = isAllowedContentType(contentType);
-    const shouldCapture = isAllowed && isValidStatus(ingestDataRequest.responseStatus);
-
-    if (!shouldCapture) {
-      console.log("Traffic not captured. ContentType allowed:", isAllowed, "Status valid:", isValidStatus(ingestDataRequest.responseStatus));
-      return {
-        success: true,
-        message: `Traffic not captured. ContentType allowed: ${isAllowed}, Status valid: ${isValidStatus(ingestDataRequest.responseStatus)}`,
-        captured: false
-      };
-    }
-
-    ctx.waitUntil((async () => {
-      try {
-        const logs = generateLogFromPayload(ingestDataRequest);
-        await sendToQueueDev(logs, env);
-      } catch (error) {
-        console.error("Error processing traffic in background (dev):", error);
-      }
-    })());
-
-    return {
-      success: true,
-      message: "Traffic successfully queued for processing (dev)",
-      captured: true
-    };
-  } catch (error) {
-    console.error("Error ingesting data (dev):", error);
-    return {
-      success: false,
-      message: `Error ingesting data: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      captured: false
-    };
-  }
-}
-
-export async function detectAndRecordThreat(
-  ingestDataRequest: IngestDataRequest,
-  env: any
-): Promise<void> {
-  try {
-    const { shouldTriggerThreatDetection, recordMaliciousEvent } = await import('./threat-detection');
-
-    const threatInfo = shouldTriggerThreatDetection(
-      ingestDataRequest,
-      ingestDataRequest.responseBody
-    );
-
-    if (threatInfo && env.THREAT_DETECTION_ENDPOINT && env.THREAT_DETECTION_TOKEN) {
-      const config = {
-        endpoint: env.THREAT_DETECTION_ENDPOINT,
-        bearerToken: env.THREAT_DETECTION_TOKEN
-      };
-
-      const result = await recordMaliciousEvent(ingestDataRequest, threatInfo, config);
-      console.log("Threat detection result:", result);
-    }
-  } catch (error) {
-    console.error("Error in threat detection:", error);
   }
 }
