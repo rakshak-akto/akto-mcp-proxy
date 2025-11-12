@@ -52,7 +52,8 @@ app.post("/ingest-data", async (c) => {
       requestBody.responseStatus,
       requestBody.responseStatusText || "",
       requestBody.responseBody || "",
-      requestBody.time
+      requestBody.time,
+      requestBody.tag
     );
 
     const result = ingestData(ingestDataRequest, c.env, c.executionCtx);
