@@ -10,54 +10,12 @@
 	"observability": {
 		"enabled": true
 	},
-	"assets": {
-		"directory": "./dist",
-		"run_worker_first": [
-			"/api/*" // API routes skip static asset handling
-		]
-	},
-	"vars": {
-		// Optional environment variables - defaults will be used if not set
-		"LIBONNX_RUNTIME_PATH": "/usr/local/lib/libonnxruntime.so",
-		"DEBUG": "false"
-	},
-	// MCP_LLM_API_KEY should be set as a secret via:
-	// wrangler secret put MCP_LLM_API_KEY
-	"containers": [
-		{
-			"name": "mcp-proxy-server",
-			"class_name": "Backend",
-			"image": "./Dockerfile",
-			"instance_type": "standard",
-			"max_instances": 3
-		}
-	],
-	"durable_objects": {
-		"bindings": [
-			{
-				"class_name": "Backend",
-				"name": "BACKEND"
-			}
-		]
-	},
 	"queues": {
 		"producers": [
 			{
 				"queue": "akto-traffic-queue",
 				"binding": "AKTO_TRAFFIC_QUEUE"
-			},
-			{
-				"queue": "akto-traffic-queue-dev",
-				"binding": "AKTO_TRAFFIC_QUEUE_DEV"
 			}
 		]
-	},
-	"migrations": [
-		{
-			"new_sqlite_classes": [
-				"Backend"
-			],
-			"tag": "v1"
-		}
-	]
+	}
 }

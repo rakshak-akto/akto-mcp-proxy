@@ -60,6 +60,7 @@ jspm_packages/
 
 .dev.vars
 .wrangler/
+worker-configuration.d.ts
 
 # IDE files
 .vscode/
@@ -71,9 +72,9 @@ go.sum
 
 # Build file
 container_src/main
-akto-mcp-proxy
 scripts/
 *.bkp
+dist/
 
 tokenizer.json
 model.onnx
