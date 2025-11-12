@@ -1,6 +1,6 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "akto-mcp-proxy",
+	"name": "akto-mcp-proxy-nginx",
 	"account_id": "53a10bdb35f546522193c9670ad3e7e5",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-06-23",
@@ -13,8 +13,8 @@
 	"queues": {
 		"producers": [
 			{
-				"queue": "akto-traffic-queue",
-				"binding": "AKTO_TRAFFIC_QUEUE"
+				"queue": "akto-traffic-queue-nginx",
+				"binding": "AKTO_TRAFFIC_QUEUE_NGINX"
 			}
 		]
 	}
